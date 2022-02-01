@@ -5588,7 +5588,9 @@ for shape in [(1,), ()]:
                   check_backward_ad=False, check_batched_grad=False)
 
     def test_custom_function_forward_mode_forward_is_no_op(self):
-        for jvp_mul_by_2 in (True, False):
+        error_regex = "A custom Function's forward is returning a view \\(or an input as-is\\)"
+
+        for returns_view in (True, False):
             class MyFn(torch.autograd.Function):
                 @staticmethod
                 def forward(ctx, x, y):
@@ -5600,23 +5602,43 @@ for shape in [(1,), ()]:
 
                 @staticmethod
                 def jvp(ctx, x_t, y_t):
-                    if jvp_mul_by_2:
-                        # If the user returns input as-is, this result
-                        # isn't used!
-                        return x_t + y_t, x_t * 2
+                    if returns_view:
+                        # If we return an input as-is in forward, that is treated
+                        # as if self.view_as(self) is performed
+                        return x_t + y_t, x_t.view_as(x_t)
                     else:
                         return x_t + y_t, x_t
 
-            x = torch.tensor(1., dtype=torch.double, requires_grad=True)
+            a = torch.tensor(1., dtype=torch.double, requires_grad=True)
             t = torch.tensor(1., dtype=torch.double)
-            y = torch.tensor(1., dtype=torch.double, requires_grad=True)
+            b = torch.tensor(1., dtype=torch.double, requires_grad=True)
+
+            c = torch.tensor(1., dtype=torch.double)
+            t2 = torch.tensor(1., dtype=torch.double)
+            d = torch.tensor(1., dtype=torch.double)
 
             with fwAD.dual_level():
-                x_dual = fwAD.make_dual(x, t)
-                _, out2 = MyFn.apply(x_dual, y)
-                self.assertTrue(fwAD.unpack_dual(out2).tangent._base is t)
+                a_dual = fwAD.make_dual(a, t)
+                c_dual = fwAD.make_dual(c, t2)
 
-            gradcheck(MyFn.apply, (x, y), check_forward_ad=True)
+                if returns_view:
+                    _, out2 = MyFn.apply(a_dual, b)
+                    self.assertTrue(fwAD.unpack_dual(out2).tangent._base is t)
+
+                    _, out2 = MyFn.apply(c_dual, d)
+                    self.assertTrue(fwAD.unpack_dual(out2).tangent._base is t2)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, error_regex):
+                        MyFn.apply(a_dual, b)
+
+                    with self.assertRaisesRegex(RuntimeError, error_regex):
+                        MyFn.apply(c_dual, d)
+
+            if returns_view:
+                gradcheck(MyFn.apply, (a, c), check_forward_ad=True)
+            else:
+                with self.assertRaisesRegex(RuntimeError, error_regex):
+                    gradcheck(MyFn.apply, (a, c), check_forward_ad=True)
 
     def test_custom_function_save_for_forward(self):
         class Func(torch.autograd.Function):
